@@ -43,6 +43,24 @@ extension StringProtocol {
       return self.endIndex
     }
   }
+
+  func canFlowInto() -> Bool {
+    if #available(macOS 13.0, *) {
+      return !self.trimmingPrefix(while: { $0.isWhitespace }).starts(with: "-")
+    } else {
+      // Fallback on earlier versions
+      return false
+    }
+  }
+
+  var indent: Int {
+    if let prefix = self.firstIndex(where: { !$0.isWhitespace }) {
+      if self[prefix...prefix] == "-" {
+        return self[..<prefix].count + 1
+      }
+    }
+    return 0
+  }
 }
 
 fileprivate extension Array where Element == String {
@@ -50,12 +68,14 @@ fileprivate extension Array where Element == String {
     let usableWidth = usableWidth - linePrefix.count
     var sourceLines = self
     var formattedLines: [String] = []
+    var indent = 0
     while !sourceLines.isEmpty {
-      let line = sourceLines.removeFirst()
+      let line = String(repeating: " ", count: indent) + sourceLines.removeFirst()
 
       // this line doesn't require any reflowing
       if line.count <= usableWidth {
         formattedLines.append(linePrefix + line)
+        indent = 0
         continue
       }
 
@@ -65,7 +85,22 @@ fileprivate extension Array where Element == String {
 
       // deal with leftover text from the current line
       if !sourceLines.isEmpty {
+        
+        indent = Swift.max(indent, line.indent)
+
+        // can we merge with the next line? If it doesn't start with a '-', then sure
+        // should we track an indentation level for the wrapping? for example:
+        // - foo <lots of text>
+        //   wraps to here
+        // instead of:
+        // - foo <lost of text>
+        // wraps to here
+
         let nextLine = String(sourceLines[0])
+        if !nextLine.canFlowInto() {
+          sourceLines.insert(String(line[sliceIndex...]), at: 0)
+          continue
+        }
         // we need to make sure there is a ' ' character between lines
         // when we merge them
         let separator = nextLine.starts(with: " ") ? "" : " "
