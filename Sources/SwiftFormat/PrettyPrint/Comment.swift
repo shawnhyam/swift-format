@@ -64,66 +64,26 @@ extension StringProtocol {
 }
 
 fileprivate extension Array where Element == String {
-  func wrapText(_ usableWidth: Int, linePrefix: String = "") -> [String] {
-    let usableWidth = usableWidth - linePrefix.count
-    var sourceLines = self
-    var formattedLines: [String] = []
-    var indent = 0
-    while !sourceLines.isEmpty {
-      let line = String(repeating: " ", count: indent) + sourceLines.removeFirst()
-
-      // this line doesn't require any reflowing
-      if line.count <= usableWidth {
-        formattedLines.append(linePrefix + line)
-        indent = 0
-        continue
-      }
-
-      // search backwards for a match
-      let sliceIndex = line.findBreakIndex(usableWidth)
-      formattedLines.append(linePrefix + line[..<sliceIndex])
-
-      // deal with leftover text from the current line
-      if !sourceLines.isEmpty {
-        
-        indent = Swift.max(indent, line.indent)
-
-        // can we merge with the next line? If it doesn't start with a '-', then sure
-        // should we track an indentation level for the wrapping? for example:
-        // - foo <lots of text>
-        //   wraps to here
-        // instead of:
-        // - foo <lost of text>
-        // wraps to here
-
-        let nextLine = String(sourceLines[0])
-        if !nextLine.canFlowInto() {
-          sourceLines.insert(String(line[sliceIndex...]), at: 0)
-          continue
-        }
-        // we need to make sure there is a ' ' character between lines
-        // when we merge them
-        let separator = nextLine.starts(with: " ") ? "" : " "
-        sourceLines[0] = line[sliceIndex...] + separator + nextLine
-      } else {
-        sourceLines.append(String(line[sliceIndex...]))
-      }
-    }
-    return formattedLines
-  }
-
   func markdownFormat(_ usableWidth: Int, linePrefix: String = "") -> [String] {
     let linePrefix = linePrefix + " "
-    let document = Document(parsing: self.map({ $0.trimmingTrailingWhitespace() }).joined(separator: "\n"), options: .disableSmartOpts)
-    let lineLimit = MarkupFormatter.Options.PreferredLineLimit(maxLength: usableWidth, breakWith: .softBreak)
-    let options = MarkupFormatter.Options(useCodeFence: .onlyWhenLanguageIsPresent, preferredLineLimit: lineLimit, customLinePrefix: linePrefix)
-    let output = document.format(options: options)
-    // because of the customLinePrefix, blank comment lines have a single space that we should remove
-    let lines = output.split(separator: "\n").map { $0.trimmingTrailingWhitespace() }
+    let document = Document(parsing: self.joined(separator: "\n"), options: .disableSmartOpts)
+    let lineLimit = MarkupFormatter.Options.PreferredLineLimit(
+      maxLength: usableWidth,
+      breakWith: .softBreak
+    )
+    let formatterOptions = MarkupFormatter.Options(
+      orderedListNumerals: .incrementing(start: 1),
+      useCodeFence: .onlyWhenLanguageIsPresent,
+      condenseAutolinks: false,
+      preferredLineLimit: lineLimit,
+      customLinePrefix: linePrefix
+    )
+    let output = document.format(options: formatterOptions)
+    let lines = output.split(separator: "\n")
     if lines.isEmpty {
       return [linePrefix]
     }
-    return lines
+    return lines.map { String($0) }
   }
 }
 
@@ -160,7 +120,7 @@ struct Comment {
 
     switch kind {
     case .line, .docLine:
-      self.text = [text.trimmingTrailingWhitespace()]
+      self.text = [text]
       self.text[0].removeFirst(kind.prefixLength)
       self.length = self.text.reduce(0, { $0 + $1.count + kind.prefixLength + 1 })
 
@@ -187,12 +147,14 @@ struct Comment {
       if wrap {
         let indentation = indent.indentation()
         let usableWidth = width - indentation.count
-        let wrappedLines = self.text.wrapText(usableWidth, linePrefix: kind.prefix)
-        // let wrappedLines = self.text.markdownFormat(usableWidth, linePrefix: kind.prefix)
+        let wrappedLines = self.text.markdownFormat(usableWidth, linePrefix: kind.prefix)
         return wrappedLines.joined(separator: "\n" + indentation)
       } else {
         let separator = "\n" + indent.indentation() + kind.prefix
-        return kind.prefix + self.text.joined(separator: separator)
+        // trailing whitespace is meaningful in Markdown, so we can't remove it
+        // when formatting comments, but we can here
+        let trimmedLines = self.text.map { $0.trimmingTrailingWhitespace() }
+        return kind.prefix + trimmedLines.joined(separator: separator)
       }
     case .block, .docBlock:
       let separator = "\n"
