@@ -11,10 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import Markdown
 import SwiftSyntax
 
 extension StringProtocol {
-  /// Trims whitespace from the end of a string, returning a new string with no trailing whitespace.
+  /// Trims whitespace from the end of a string, returning a new string with
+  /// no trailing whitespace.
   ///
   /// If the string is only whitespace, an empty string is returned.
   ///
@@ -85,10 +87,25 @@ struct Comment {
     }
   }
 
-  func print(indent: [Indent]) -> String {
+  func print(indent: [Indent], availableWidth: Int, maxCommentWidth: Int, format: Bool) -> String {
     switch self.kind {
+    case .docLine where format:
+      let indentation = indent.indentation()
+      let usableWidth = availableWidth - indentation.count
+      let wrappedLines = markdownFormat(
+        self.text, min(usableWidth - kind.prefixLength, maxCommentWidth))
+      let emptyLinesTrimmed = wrappedLines.map {
+        if $0.allSatisfy({ $0.isWhitespace }) {
+          return kind.prefix
+        } else {
+          return kind.prefix + " " + $0
+        }
+      }
+      return emptyLinesTrimmed.joined(separator: "\n" + indentation)
     case .line, .docLine:
       let separator = "\n" + indent.indentation() + kind.prefix
+      // trailing whitespace is meaningful in Markdown, so we can't remove it
+      // when formatting comments, but we can here
       let trimmedLines = self.text.map { $0.trimmingTrailingWhitespace() }
       return kind.prefix + trimmedLines.joined(separator: separator)
     case .block, .docBlock:
@@ -101,6 +118,41 @@ struct Comment {
     for line in text {
       self.text.append(line)
       self.length += line.count + self.kind.prefixLength + 1
+    }
+  }
+}
+
+/// Feed the given text into the Markdown document formatter and return
+/// the resulting formatted text.
+///
+/// - Parameters:
+///   - lines: The lines of text to be formatted.
+///   - maxLength: Maximum length of a line of formatted text.
+/// - Returns: The Markdown-formatted lines.
+fileprivate func markdownFormat(_ lines: [String], _ maxLength: Int) -> [String] {
+  let document = Document(parsing: lines.joined(separator: "\n"), options: .disableSmartOpts)
+  let lineLimit = MarkupFormatter.Options.PreferredLineLimit(
+    maxLength: maxLength,
+    breakWith: .softBreak
+  )
+  let formatterOptions = MarkupFormatter.Options(
+    orderedListNumerals: .incrementing(start: 1),
+    useCodeFence: .always,
+    condenseAutolinks: false,
+    preferredLineLimit: lineLimit
+  )
+  let output = document.format(options: formatterOptions)
+  let lines = output.split(separator: "\n")
+  return lines.map {
+    // unfortunately we have to do a bit of post-processing; the formatter uses double-space
+    // as a forced line break, but a lot of editors and formatters remove trailing whitespace.
+    // replace the double-space with a trailing backslash, which is also a force line break
+    if let last = $0.last, let secondLast = $0.dropLast().last,
+      last.isWhitespace && secondLast.isWhitespace
+    {
+      return $0.trimmingTrailingWhitespace() + " \\"
+    } else {
+      return $0.trimmingTrailingWhitespace()
     }
   }
 }

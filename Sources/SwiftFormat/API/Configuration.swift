@@ -45,6 +45,8 @@ public struct Configuration: Codable, Equatable {
     case spacesAroundRangeFormationOperators
     case noAssignmentInExpressions
     case multiElementCollectionTrailingCommas
+    case formatDocComments
+    case maximumFormattedCommentWidth
   }
 
   /// A dictionary containing the default enabled/disabled states of rules, keyed by the rules'
@@ -194,6 +196,13 @@ public struct Configuration: Codable, Equatable {
   /// ```
   public var multiElementCollectionTrailingCommas: Bool
 
+  /// Determines if doc comments should be formatted as Markdown.
+  public var formatDocComments: Bool
+
+  /// The maximum length of the text of a formatted doc comment, after which the formatter will
+  /// wrap, even if the allowable line length is greater.
+  public var maximumFormattedCommentWidth: Int
+
   /// Creates a new `Configuration` by loading it from a configuration file.
   public init(contentsOf url: URL) throws {
     let data = try Data(contentsOf: url)
@@ -286,6 +295,12 @@ public struct Configuration: Codable, Equatable {
       try container.decodeIfPresent(
         Bool.self, forKey: .multiElementCollectionTrailingCommas)
     ?? defaults.multiElementCollectionTrailingCommas
+    self.formatDocComments =
+      try container.decodeIfPresent(Bool.self, forKey: .formatDocComments)
+    ?? defaults.formatDocComments
+    self.maximumFormattedCommentWidth =
+      try container.decodeIfPresent(Int.self, forKey: .maximumFormattedCommentWidth)
+    ?? defaults.maximumFormattedCommentWidth
 
     // If the `rules` key is not present at all, default it to the built-in set
     // so that the behavior is the same as if the configuration had been
@@ -321,6 +336,8 @@ public struct Configuration: Codable, Equatable {
     try container.encode(indentSwitchCaseLabels, forKey: .indentSwitchCaseLabels)
     try container.encode(noAssignmentInExpressions, forKey: .noAssignmentInExpressions)
     try container.encode(multiElementCollectionTrailingCommas, forKey: .multiElementCollectionTrailingCommas)
+    try container.encode(formatDocComments, forKey: .formatDocComments)
+    try container.encode(maximumFormattedCommentWidth, forKey: .maximumFormattedCommentWidth)
     try container.encode(rules, forKey: .rules)
   }
 

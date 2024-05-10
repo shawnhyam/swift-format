@@ -40,5 +40,7 @@ extension Configuration {
     self.spacesAroundRangeFormationOperators = false
     self.noAssignmentInExpressions = NoAssignmentInExpressionsConfiguration()
     self.multiElementCollectionTrailingCommas = true
+    self.formatDocComments = false
+    self.maximumFormattedCommentWidth = 72
   }
 }
