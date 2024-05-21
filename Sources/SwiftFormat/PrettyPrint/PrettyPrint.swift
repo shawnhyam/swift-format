@@ -66,10 +66,7 @@ public class PrettyPrinter {
   private var configuration: Configuration { return context.configuration }
   private let maxLineLength: Int
   private var tokens: [Token]
-  private var outputBuffer: String = ""
-
-  /// The number of spaces remaining on the current line.
-  private var spaceRemaining: Int
+  private var outputBuffer: PrettyPrintBuffer
 
   /// Keep track of the token lengths.
   private var lengths = [Int]()
@@ -99,9 +96,6 @@ public class PrettyPrinter {
   /// The most recently ended breaking context, used to force certain following `contextual` breaks.
   private var lastEndedBreakingContext: ActiveBreakingContext? = nil
 
-  /// Keeps track of the current line number being printed.
-  private var lineNumber: Int = 1
-
   /// Indicates whether or not the current line being printed is a continuation line.
   private var currentLineIsContinuation = false
 
@@ -111,18 +105,6 @@ public class PrettyPrinter {
   /// Keeps track of the line number where comma regions started. Line numbers are removed as their
   /// corresponding end token are encountered.
   private var commaDelimitedRegionStack: [Int] = []
-
-  /// Keeps track of the most recent number of consecutive newlines that have been printed.
-  ///
-  /// This value is reset to zero whenever non-newline content is printed.
-  private var consecutiveNewlineCount = 0
-
-  /// Keeps track of the most recent number of spaces that should be printed before the next text
-  /// token.
-  private var pendingSpaces = 0
-
-  /// Indicates whether or not the printer is currently at the beginning of a line.
-  private var isAtStartOfLine = true
 
   /// Tracks how many printer control tokens to suppress firing breaks are active.
   private var activeBreakSuppressionCount = 0
@@ -153,17 +135,6 @@ public class PrettyPrinter {
     return totalIndentation
   }
 
-  /// The current line number being printed, with adjustments made for open/close break
-  /// calculations.
-  ///
-  /// Some of the open/close break logic is based on whether matching breaks are located on the same
-  /// physical line. In some situations, newlines can be printed before breaks that would cause the
-  /// line number to increase by one by the time we reach the break, when we really wish to consider
-  /// the break as being located at the end of the previous line.
-  private var openCloseBreakCompensatingLineNumber: Int {
-    return isAtStartOfLine ? lineNumber - 1 : lineNumber
-  }
-
   /// Creates a new PrettyPrinter with the provided formatting configuration.
   ///
   /// - Parameters:
@@ -178,75 +149,9 @@ public class PrettyPrinter {
     self.tokens = node.makeTokenStream(
       configuration: configuration, operatorTable: context.operatorTable)
     self.maxLineLength = configuration.lineLength
-    self.spaceRemaining = self.maxLineLength
     self.printTokenStream = printTokenStream
     self.whitespaceOnly = whitespaceOnly
-  }
-
-  /// Append the given string to the output buffer.
-  ///
-  /// No further processing is performed on the string.
-  private func writeRaw<S: StringProtocol>(_ str: S) {
-    outputBuffer.append(String(str))
-  }
-
-  /// Writes newlines into the output stream, taking into account any preexisting consecutive
-  /// newlines and the maximum allowed number of blank lines.
-  ///
-  /// This function does some implicit collapsing of consecutive newlines to ensure that the
-  /// results are consistent when breaks and explicit newlines coincide. For example, imagine a
-  /// break token that fires (thus creating a single non-discretionary newline) because it is
-  /// followed by a group that contains 2 discretionary newlines that were found in the user's
-  /// source code at that location. In that case, the break "overlaps" with the discretionary
-  /// newlines and it will write a newline before we get to the discretionaries. Thus, we have to
-  /// subtract the previously written newlines during the second call so that we end up with the
-  /// correct number overall.
-  ///
-  /// - Parameter newlines: The number and type of newlines to write.
-  private func writeNewlines(_ newlines: NewlineBehavior) {
-    let numberToPrint: Int
-    switch newlines {
-    case .elective:
-      numberToPrint = consecutiveNewlineCount == 0 ? 1 : 0
-    case .soft(let count, _):
-      // We add 1 to the max blank lines because it takes 2 newlines to create the first blank line.
-      numberToPrint = min(count, configuration.maximumBlankLines + 1) - consecutiveNewlineCount
-    case .hard(let count):
-      numberToPrint = count
-    }
-
-    guard numberToPrint > 0 else { return }
-    writeRaw(String(repeating: "\n", count: numberToPrint))
-    lineNumber += numberToPrint
-    isAtStartOfLine = true
-    consecutiveNewlineCount += numberToPrint
-    pendingSpaces = 0
-  }
-
-  /// Request that the given number of spaces be printed out before the next text token.
-  ///
-  /// Spaces are printed only when the next text token is printed in order to prevent us from
-  /// printing lines that are only whitespace or have trailing whitespace.
-  private func enqueueSpaces(_ count: Int) {
-    pendingSpaces += count
-    spaceRemaining -= count
-  }
-
-  /// Writes the given text to the output stream.
-  ///
-  /// Before printing the text, this function will print any line-leading indentation or interior
-  /// leading spaces that are required before the text itself.
-  private func write(_ text: String) {
-    if isAtStartOfLine {
-      writeRaw(currentIndentation.indentation())
-      spaceRemaining = maxLineLength - currentIndentation.length(in: configuration)
-      isAtStartOfLine = false
-    } else if pendingSpaces > 0 {
-      writeRaw(String(repeating: " ", count: pendingSpaces))
-    }
-    writeRaw(text)
-    consecutiveNewlineCount = 0
-    pendingSpaces = 0
+    self.outputBuffer = PrettyPrintBuffer(maximumBlankLines: configuration.maximumBlankLines, tabWidth: configuration.tabWidth)
   }
 
   /// Print out the provided token, and apply line-wrapping and indentation as needed.
@@ -268,7 +173,7 @@ public class PrettyPrinter {
 
     switch token {
     case .contextualBreakingStart:
-      activeBreakingContexts.append(ActiveBreakingContext(lineNumber: lineNumber))
+      activeBreakingContexts.append(ActiveBreakingContext(lineNumber: outputBuffer.lineNumber))
 
       // Discard the last finished breaking context to keep it from effecting breaks inside of the
       // new context. The discarded context has already either had an impact on the contextual break
@@ -289,7 +194,7 @@ public class PrettyPrinter {
     // the group.
     case .open(let breaktype):
       // Determine if the break tokens in this group need to be forced.
-      if (length > spaceRemaining || lastBreak), case .consistent = breaktype {
+      if (shouldBreak(length) || lastBreak), case .consistent = breaktype {
         forceBreakStack.append(true)
       } else {
         forceBreakStack.append(false)
@@ -311,7 +216,7 @@ public class PrettyPrinter {
       switch kind {
       case .open(let openKind):
         let lastOpenBreak = activeOpenBreaks.last
-        let currentLineNumber = openCloseBreakCompensatingLineNumber
+        let currentLineNumber = outputBuffer.openCloseBreakCompensatingLineNumber
 
         // Only increase the indentation if there wasn't an open break already encountered on this
         // line (i.e., the previous open break didn't fire), to prevent the indentation of the next
@@ -331,7 +236,7 @@ public class PrettyPrinter {
         // scope), so we need the continuation indentation to persist across all the lines in that
         // scope. Additionally, continuation open breaks must indent when the break fires.
         let continuationBreakWillFire = openKind == .continuation
-          && (isAtStartOfLine || length > spaceRemaining || mustBreak)
+          && (outputBuffer.isAtStartOfLine || shouldBreak(length) || mustBreak)
         let contributesContinuationIndent = currentLineIsContinuation || continuationBreakWillFire
 
         activeOpenBreaks.append(
@@ -355,12 +260,12 @@ public class PrettyPrinter {
         }
 
         let openedOnDifferentLine
-          = openCloseBreakCompensatingLineNumber != matchingOpenBreak.lineNumber
+          = outputBuffer.openCloseBreakCompensatingLineNumber != matchingOpenBreak.lineNumber
 
         if matchingOpenBreak.contributesBlockIndent {
           // The actual line number is used, instead of the compensating line number. When the close
           // break is at the start of a new line, the block indentation isn't carried to the new line.
-          let currentLine = lineNumber
+          let currentLine = outputBuffer.lineNumber
           // When two or more open breaks are encountered on the same line, only the final open
           // break is allowed to increase the block indent, avoiding multiple block indents. As the
           // open breaks on that line are closed, the new final open break must be enabled again to
@@ -378,7 +283,7 @@ public class PrettyPrinter {
           // If it's a mandatory breaking close, then we must break (regardless of line length) if
           // the break is on a different line than its corresponding open break.
           mustBreak = openedOnDifferentLine
-        } else if spaceRemaining == 0 {
+        } else if shouldBreak(1) {
           // If there is no room left on the line, then we must force this break to fire so that the
           // next token that comes along (typically a closing bracket of some kind) ends up on the
           // next line.
@@ -436,13 +341,13 @@ public class PrettyPrinter {
         // context includes a multiline trailing closure or multiline function argument list.
         if let lastBreakingContext = lastEndedBreakingContext {
           if configuration.lineBreakAroundMultilineExpressionChainComponents {
-            mustBreak = lastBreakingContext.lineNumber != lineNumber
+            mustBreak = lastBreakingContext.lineNumber != outputBuffer.lineNumber
           }
         }
 
         // Wait for a contextual break to fire and then update the breaking behavior for the rest of
         // the contextual breaks in this scope to match the behavior of the one that fired.
-        let willFire = (!isAtStartOfLine && length > spaceRemaining) || mustBreak
+        let willFire = shouldBreak(length) || mustBreak
         if willFire {
           // Update the active breaking context according to the most recently finished breaking
           // context so all following contextual breaks in this scope to have matching behavior.
@@ -451,7 +356,7 @@ public class PrettyPrinter {
             case .unset = activeContext.contextualBreakingBehavior
           {
             activeBreakingContexts[activeBreakingContexts.count - 1].contextualBreakingBehavior =
-              (closedContext.lineNumber == lineNumber) ? .continuation : .maintain
+            (closedContext.lineNumber == outputBuffer.lineNumber) ? .continuation : .maintain
           }
         }
 
@@ -482,12 +387,12 @@ public class PrettyPrinter {
       }
 
       let suppressBreaking = isBreakingSuppressed && !overrideBreakingSuppressed
-      if !suppressBreaking && ((!isAtStartOfLine && length > spaceRemaining) || mustBreak) {
+      if !suppressBreaking && (shouldBreak(length) || mustBreak) {
         currentLineIsContinuation = isContinuationIfBreakFires
-        writeNewlines(newline)
+        outputBuffer.writeNewlines(newline)
         lastBreak = true
       } else {
-        if isAtStartOfLine {
+        if outputBuffer.isAtStartOfLine {
           // Make sure that the continuation status is correct even at the beginning of a line
           // (for example, after a newline token). This is necessary because a discretionary newline
           // might be inserted into the token stream before a continuation break, and the length of
@@ -495,39 +400,33 @@ public class PrettyPrinter {
           // treat the line as a continuation.
           currentLineIsContinuation = isContinuationIfBreakFires
         }
-        enqueueSpaces(size)
+        outputBuffer.enqueueSpaces(size)
         lastBreak = false
       }
 
     // Print out the number of spaces according to the size, and adjust spaceRemaining.
     case .space(let size, _):
-      enqueueSpaces(size)
+      outputBuffer.enqueueSpaces(size)
 
     // Print any indentation required, followed by the text content of the syntax token.
     case .syntax(let text):
       guard !text.isEmpty else { break }
       lastBreak = false
-      write(text)
-      spaceRemaining -= text.count
+      outputBuffer.write(currentIndentation, text)
 
     case .comment(let comment, let wasEndOfLine):
       lastBreak = false
 
-      write(comment.print(indent: currentIndentation))
       if wasEndOfLine {
-        if comment.length > spaceRemaining && !isBreakingSuppressed {
+        if shouldBreak(comment.length) && !isBreakingSuppressed {
           diagnose(.moveEndOfLineComment, category: .endOfLineComment)
         }
-      } else {
-        spaceRemaining -= comment.length
       }
+      outputBuffer.write(currentIndentation, comment.print(indent: currentIndentation))
 
     case .verbatim(let verbatim):
-      writeRaw(verbatim.print(indent: currentIndentation))
-      consecutiveNewlineCount = 0
-      pendingSpaces = 0
+      outputBuffer.writeVerbatim(verbatim.print(indent: currentIndentation), length)
       lastBreak = false
-      spaceRemaining -= length
 
     case .printerControl(let kind):
       switch kind {
@@ -544,7 +443,7 @@ public class PrettyPrinter {
       }
 
     case .commaDelimitedRegionStart:
-      commaDelimitedRegionStack.append(openCloseBreakCompensatingLineNumber)
+      commaDelimitedRegionStack.append(outputBuffer.openCloseBreakCompensatingLineNumber)
 
     case .commaDelimitedRegionEnd(let hasTrailingComma, let isSingleElement):
       guard let startLineNumber = commaDelimitedRegionStack.popLast() else {
@@ -557,7 +456,7 @@ public class PrettyPrinter {
       // We never want to add a trailing comma in an initializer so we disable trailing commas on
       // single element collections.
       let shouldHaveTrailingComma =
-        startLineNumber != openCloseBreakCompensatingLineNumber && !isSingleElement && configuration.multiElementCollectionTrailingCommas
+      startLineNumber != outputBuffer.openCloseBreakCompensatingLineNumber && !isSingleElement && configuration.multiElementCollectionTrailingCommas
       if shouldHaveTrailingComma && !hasTrailingComma {
         diagnose(.addTrailingComma, category: .trailingComma)
       } else if !shouldHaveTrailingComma && hasTrailingComma {
@@ -566,8 +465,7 @@ public class PrettyPrinter {
 
       let shouldWriteComma = whitespaceOnly ? hasTrailingComma : shouldHaveTrailingComma
       if shouldWriteComma {
-        write(",")
-        spaceRemaining -= 1
+        outputBuffer.write(currentIndentation, ",")
       }
     }
   }
@@ -694,7 +592,7 @@ public class PrettyPrinter {
       fatalError("At least one .break(.open) was not matched by a .break(.close)")
     }
 
-    return outputBuffer
+    return outputBuffer.output
   }
 
   /// Used to track the indentation level for the debug token stream output.
@@ -778,14 +676,20 @@ public class PrettyPrinter {
     }
   }
 
+  private func shouldBreak(_ length: Int) -> Bool {
+    let spaceRemaining = configuration.lineLength - outputBuffer.column
+    return !outputBuffer.isAtStartOfLine && length > spaceRemaining
+  }
+
+
   /// Emits a finding with the given message and category at the current location in `outputBuffer`.
   private func diagnose(_ message: Finding.Message, category: PrettyPrintFindingCategory) {
     // Add 1 since columns uses 1-based indices.
-    let column = maxLineLength - spaceRemaining + 1
+    let column = outputBuffer.column + 1
     context.findingEmitter.emit(
       message,
       category: category,
-      location: Finding.Location(file: context.fileURL.path, line: lineNumber, column: column))
+      location: Finding.Location(file: context.fileURL.path, line: outputBuffer.lineNumber, column: column))
   }
 }
 
